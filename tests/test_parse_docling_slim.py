@@ -778,7 +778,7 @@ class VisionDecisionTests(unittest.TestCase):
         record = make_record(ocr="\ufffd\ufffd 1 2\n| | \ufffd", width=300, height=200)
         _classify_images([record])
         self.assertLess(record["classification_confidence"], 0.75)
-        with patch(
+        with patch("parse_docling_slim.vision_available", return_value=True), patch(
             "parse_docling_slim.classify_and_extract_image",
             side_effect=RuntimeError("boom"),
         ):
