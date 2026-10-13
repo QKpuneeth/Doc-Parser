@@ -16,23 +16,25 @@ import zipfile
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from PIL import Image
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.backend.mspowerpoint_backend import MsPowerpointDocumentBackend
 from docling.backend.msword_backend import MsWordDocumentBackend
-from docling.datamodel.backend_options import MsPowerpointBackendOptions, MsWordBackendOptions
+from docling.datamodel.backend_options import (
+    MsPowerpointBackendOptions,
+    MsWordBackendOptions,
+)
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, FormatOption, PdfFormatOption
 from docling.pipeline.simple_pipeline import SimplePipeline
 from docling_core.types.doc import ContentLayer, DoclingDocument, PictureItem, TableItem
+from PIL import Image
 
 import image_signals
 from vision_utils import classify_and_extract_image, vision_available
-
 
 SUPPORTED = {".pdf", ".docx", ".pptx"}
 ARCHIVE = {".zip"}
@@ -293,7 +295,7 @@ def _page_keys(doc: DoclingDocument) -> list[int]:
     if not hasattr(pages, "items"):
         return []
     result = []
-    for key, _ in pages.items():
+    for key in pages:
         try:
             number = int(key)
         except (TypeError, ValueError):
@@ -581,7 +583,7 @@ def _link_duplicate_assets(records: list[dict[str, Any]]) -> dict[str, Any]:
         "classification_method",
         "classification_reason",
     )
-    for digest, group in by_hash.items():
+    for group in by_hash.values():
         if len(group) < 2:
             continue
         owner = group[0]
@@ -841,7 +843,7 @@ def _render_markdown(
             f"Marker/picture count mismatch: {marker_count} markers vs {len(records)} pictures"
         )
     output = parts[0]
-    for record, remainder in zip(records, parts[1:]):
+    for record, remainder in zip(records, parts[1:], strict=False):
         if record.get("include_in_md", True):
             block = _image_block(record, include_ocr=include_ocr)
         else:
@@ -981,13 +983,12 @@ def _render_document_markdown(
     no_page = [record for record in records if record.get("page") is None]
     extra_records = unknown + no_page
     if extra_records:
-        blocks = []
-        for record in extra_records:
-            blocks.append(
-                _image_block(record, include_ocr=include_ocr)
-                if record.get("include_in_md", True)
-                else f"<!-- IMAGE OMITTED: {record.get('omit_reason', 'omitted')}; asset={record.get('relative_path', '')} -->"
-            )
+        blocks = [
+            _image_block(record, include_ocr=include_ocr)
+            if record.get("include_in_md", True)
+            else f"<!-- IMAGE OMITTED: {record.get('omit_reason', 'omitted')}; asset={record.get('relative_path', '')} -->"
+            for record in extra_records
+        ]
         sections.append("<!-- PAGE: unknown -->\n\n" + "\n\n".join(blocks))
     return "\n\n".join(sections).strip() + "\n"
 
@@ -1088,12 +1089,9 @@ def _picture_metadata(item: Any) -> dict[str, Any]:
             "chart_data": None,
         }
     grid = getattr(chart_data, "grid", []) or []
-    matrix = []
-    for row in grid:
-        values = []
-        for cell in row:
-            values.append(_as_text(getattr(cell, "text", "")))
-        matrix.append(values)
+    matrix = [
+        [_as_text(getattr(cell, "text", "")) for cell in row] for row in grid
+    ]
     if not matrix:
         cells = getattr(chart_data, "table_cells", []) or []
         try:
@@ -1106,8 +1104,8 @@ def _picture_metadata(item: Any) -> dict[str, Any]:
             matrix = [["" for _ in range(column_count)] for _ in range(row_count)]
             for cell in cells:
                 try:
-                    row = int(getattr(cell, "start_row_offset_idx"))
-                    column = int(getattr(cell, "start_col_offset_idx"))
+                    row = int(cell.start_row_offset_idx)
+                    column = int(cell.start_col_offset_idx)
                 except (AttributeError, TypeError, ValueError):
                     continue
                 if 0 <= row < row_count and 0 <= column < column_count:
@@ -1409,16 +1407,19 @@ def _apply_vision(
         # reliable image type, so the call would add cost without adding a
         # decision; images explicitly marked as required are always enriched.
         confidence = record.get("classification_confidence")
-        if not record.get("vision_required") and isinstance(confidence, (int, float)):
-            if float(confidence) >= threshold:
-                record["vision_status"] = "skipped_confident"
-                record["vision_skip_reason"] = (
-                    f"classification confidence {float(confidence):.2f} is at or above "
-                    f"the Vision threshold {threshold:.2f}"
-                )
-                skipped += 1
-                statuses["skipped_confident"] += 1
-                continue
+        if (
+            not record.get("vision_required")
+            and isinstance(confidence, (int, float))
+            and float(confidence) >= threshold
+        ):
+            record["vision_status"] = "skipped_confident"
+            record["vision_skip_reason"] = (
+                f"classification confidence {float(confidence):.2f} is at or above "
+                f"the Vision threshold {threshold:.2f}"
+            )
+            skipped += 1
+            statuses["skipped_confident"] += 1
+            continue
         if max_images is not None and calls >= max_images:
             record["vision_status"] = "skipped_limit"
             record["vision_skip_reason"] = (
@@ -1607,7 +1608,7 @@ def _build_metadata(
     return {
         "schema_version": SCHEMA_VERSION,
         "parser": {"name": PARSER_NAME, "version": SCHEMA_VERSION},
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "parse_started_at": started.isoformat(),
         "source": {
             "path": str(source_path),
@@ -1747,8 +1748,10 @@ def _validate_outputs(
         for reference in IMAGE_REF_RE.findall(markdown)
         if not reference.startswith("images/")
     ]
-    for reference in stray_references:
-        errors.append(f"Markdown image reference is not an external image asset: {reference}")
+    errors.extend(
+        f"Markdown image reference is not an external image asset: {reference}"
+        for reference in stray_references
+    )
     expected_refs = Counter(
         record["relative_path"]
         for record in records
@@ -1759,9 +1762,11 @@ def _validate_outputs(
             errors.append(f"Missing Markdown image reference for {path}")
         if not (output_dir / path).is_file():
             errors.append(f"Image asset is missing: {path}")
-    for path in references:
-        if not (output_dir / path).is_file():
-            errors.append(f"Markdown points to missing image: {path}")
+    errors.extend(
+        f"Markdown points to missing image: {path}"
+        for path in references
+        if not (output_dir / path).is_file()
+    )
 
     for table in tables:
         representation = _table_representation(table)
@@ -1810,9 +1815,11 @@ def _validate_outputs(
         errors.append("document.md is empty")
 
     # Paths must be relative so the output directory can be moved or zipped.
-    for match in sorted(set(IMAGE_REF_RE.findall(markdown))):
-        if match.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", match) or "://" in match:
-            errors.append(f"Markdown image reference is not portable: {match}")
+    errors.extend(
+        f"Markdown image reference is not portable: {match}"
+        for match in sorted(set(IMAGE_REF_RE.findall(markdown)))
+        if match.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", match) or "://" in match
+    )
 
     for record in records:
         if not record.get("include_in_md", True):
@@ -1832,7 +1839,7 @@ def _validate_outputs(
         digest = _as_text(record.get("sha256"))
         if digest:
             by_asset.setdefault(digest, []).append(record)
-    for digest, group in by_asset.items():
+    for group in by_asset.values():
         decisions = {
             (bool(item.get("include_in_md")), item.get("semantic_class")) for item in group
         }
@@ -1848,20 +1855,22 @@ def _validate_outputs(
         band = _as_text(record.get("classification_confidence_band"))
         if confidence is None or not band:
             continue
-        if float(confidence) >= image_signals.CONFIDENCE_HIGH and band != image_signals.BAND_HIGH:
-            errors.append(
-                f"Image {record.get('relative_path')} has confidence {confidence} but band {band}"
+        if (
+            (
+                float(confidence) >= image_signals.CONFIDENCE_HIGH
+                and band != image_signals.BAND_HIGH
             )
-        elif (
-            image_signals.CONFIDENCE_MEDIUM
-            <= float(confidence)
-            < image_signals.CONFIDENCE_HIGH
-            and band != image_signals.BAND_MEDIUM
+            or (
+                image_signals.CONFIDENCE_MEDIUM
+                <= float(confidence)
+                < image_signals.CONFIDENCE_HIGH
+                and band != image_signals.BAND_MEDIUM
+            )
+            or (
+                float(confidence) < image_signals.CONFIDENCE_MEDIUM
+                and band != image_signals.BAND_LOW
+            )
         ):
-            errors.append(
-                f"Image {record.get('relative_path')} has confidence {confidence} but band {band}"
-            )
-        elif float(confidence) < image_signals.CONFIDENCE_MEDIUM and band != image_signals.BAND_LOW:
             errors.append(
                 f"Image {record.get('relative_path')} has confidence {confidence} but band {band}"
             )
@@ -1913,7 +1922,7 @@ def _validate_outputs(
         "errors": errors,
         "warnings": warnings,
         "warning_details": warning_details,
-        "semantic_loss": [item for item in semantic_loss],
+        "semantic_loss": list(semantic_loss),
         "page_markers": marker_pages,
         "raw_image_markers": raw_counts,
         "image_references": dict(references),
@@ -2266,7 +2275,7 @@ def parse_document(
     (working_path / "images").mkdir(parents=True, exist_ok=True)
     (working_path / "logs").mkdir(parents=True, exist_ok=True)
     _setup_logging(working_path, config.log_level)
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     source_meta = _source_metadata(source_path, started)
     LOGGER.info("Starting conversion for %s", source_path)
     LOGGER.info("Source sha256=%s size=%s", source_meta["sha256"], source_meta["size_bytes"])
@@ -2583,7 +2592,7 @@ def _source_metadata(source_path: Path, started: datetime) -> dict[str, Any]:
         "size_bytes": source_path.stat().st_size,
         "sha256": _sha256_file(source_path),
         "modified_at": datetime.fromtimestamp(
-            source_path.stat().st_mtime, tz=timezone.utc
+            source_path.stat().st_mtime, tz=UTC
         ).isoformat(),
         "parsed_at": started.isoformat(),
     }
@@ -3027,18 +3036,20 @@ def _parse_into(
         written.append(metadata_path)
     if config.emit_canonical and canonical_path.is_file():
         written.append(canonical_path)
-    for log_artifact in (output_path / "logs" / "parser.log", decision_log):
-        if log_artifact and log_artifact.is_file():
-            written.append(log_artifact)
+    written.extend(
+        log_artifact
+        for log_artifact in (output_path / "logs" / "parser.log", decision_log)
+        if log_artifact and log_artifact.is_file()
+    )
     written.extend(sorted((output_path / "images").glob("*.png")))
-    for artifact in written:
-        manifest["artifacts"].append(
-            {
-                "path": artifact.relative_to(output_path).as_posix(),
-                "bytes": artifact.stat().st_size,
-                "sha256": _sha256_file(artifact),
-            }
-        )
+    manifest["artifacts"].extend(
+        {
+            "path": artifact.relative_to(output_path).as_posix(),
+            "bytes": artifact.stat().st_size,
+            "sha256": _sha256_file(artifact),
+        }
+        for artifact in written
+    )
     manifest["artifact_counts"] = {
         "total": len(manifest["artifacts"]),
         "images": sum(1 for item in manifest["artifacts"] if item["path"].startswith("images/")),
@@ -3062,7 +3073,7 @@ def _parse_into(
         "unlisted_files": integrity["unlisted_files"],
     }
     manifest["status"] = "complete" if validation["status"] != "fail" else "failed"
-    manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+    manifest["completed_at"] = datetime.now(UTC).isoformat()
     _write_json(output_path / "manifest.json", manifest)
     LOGGER.info(
         "Wrote %s with validation status %s (%s images kept, %s omitted)",
@@ -3215,25 +3226,25 @@ def _build_cli() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_cli().parse_args()
-    options = dict(
-        include_background=args.include_background,
-        include_decorative=args.include_decorative,
-        include_image_ocr=not args.no_image_ocr,
-        render_office_charts=args.render_office_charts,
-        enable_vision=args.enable_vision,
-        vision_max_images=args.vision_max_images,
-        vision_timeout=args.vision_timeout,
-        vision_retry_count=args.vision_retry_count,
-        vision_confidence_threshold=args.vision_confidence_threshold,
-        enable_asset_deduplication=not args.no_asset_deduplication,
-        enable_full_page_duplicate_detection=not args.no_full_page_duplicate_detection,
-        emit_canonical=args.emit_canonical,
-        emit_metadata=args.emit_metadata,
-        validate_output=args.validate_output,
-        images_scale=args.images_scale,
-        force=args.force,
-        log_level=args.log_level,
-    )
+    options = {
+        "include_background": args.include_background,
+        "include_decorative": args.include_decorative,
+        "include_image_ocr": not args.no_image_ocr,
+        "render_office_charts": args.render_office_charts,
+        "enable_vision": args.enable_vision,
+        "vision_max_images": args.vision_max_images,
+        "vision_timeout": args.vision_timeout,
+        "vision_retry_count": args.vision_retry_count,
+        "vision_confidence_threshold": args.vision_confidence_threshold,
+        "enable_asset_deduplication": not args.no_asset_deduplication,
+        "enable_full_page_duplicate_detection": not args.no_full_page_duplicate_detection,
+        "emit_canonical": args.emit_canonical,
+        "emit_metadata": args.emit_metadata,
+        "validate_output": args.validate_output,
+        "images_scale": args.images_scale,
+        "force": args.force,
+        "log_level": args.log_level,
+    }
     # A lone, already-supported file keeps the original single-document code path,
     # so existing invocations are unaffected. Anything else -- several inputs, a
     # directory, or a zip -- goes through parse_many, which resolves it first.

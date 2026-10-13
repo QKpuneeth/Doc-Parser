@@ -37,10 +37,7 @@ API_VERSION = _AZURE_API_VERSION
 VISION_PROVIDER = "azure" if _IS_AZURE else "openai"
 
 if API_KEY and ENDPOINT and VISION_MODEL:
-    if _IS_AZURE:
-        API_BASE = f"{ENDPOINT}/openai/deployments/{VISION_MODEL}"
-    else:
-        API_BASE = ENDPOINT
+    API_BASE = f"{ENDPOINT}/openai/deployments/{VISION_MODEL}" if _IS_AZURE else ENDPOINT
 else:
     API_BASE = None
 

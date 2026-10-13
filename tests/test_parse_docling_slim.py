@@ -14,10 +14,12 @@ import image_signals
 import vision_utils
 from parse_docling_slim import (
     IMAGE_MARKER,
+    ParserConfig,
     _apply_vision,
     _build_cli,
     _classify_images,
     _full_page_duplicate_signals,
+    _image_block,
     _image_metadata,
     _is_decorative,
     _merge_transcriptions,
@@ -27,10 +29,8 @@ from parse_docling_slim import (
     _table_representation,
     _validate_outputs,
     _vision_block,  # backwards-compatible alias of _image_block
-    _image_block,
     parse_document,
     parse_many,
-    ParserConfig,
 )
 
 
@@ -1328,7 +1328,11 @@ class MetadataAndDecisionLogTests(unittest.TestCase):
         self.assertEqual(self.read(output, "metadata.json")["validation"]["status"], "skipped")
 
     def test_type_aware_warnings_are_bucketed(self):
-        from parse_docling_slim import WARNING_WARNING, ParserConfig, _type_aware_warnings
+        from parse_docling_slim import (
+            WARNING_WARNING,
+            ParserConfig,
+            _type_aware_warnings,
+        )
 
         confident = make_record(
             ocr="14%\n19%\n35%\n28%",
@@ -1357,7 +1361,11 @@ class MetadataAndDecisionLogTests(unittest.TestCase):
         self.assertNotIn("medium_confidence_classification", kinds)
 
     def test_low_confidence_dominance_is_flagged(self):
-        from parse_docling_slim import WARNING_WARNING, ParserConfig, _type_aware_warnings
+        from parse_docling_slim import (
+            WARNING_WARNING,
+            ParserConfig,
+            _type_aware_warnings,
+        )
 
         records = [
             make_record(
@@ -1392,7 +1400,7 @@ class ValidationTests(unittest.TestCase):
                 page: SimpleNamespace(size=SimpleNamespace(width=600, height=800), image=None)
                 for page in pages
             }
-            self.marker_counts = {page: 0 for page in pages}
+            self.marker_counts = dict.fromkeys(pages, 0)
 
         def export_to_markdown(self, page_no=None, **kwargs):
             if page_no is None:
@@ -1518,7 +1526,6 @@ class TablePolicyTests(unittest.TestCase):
         self.assertEqual(_table_representation({"markdown": "", "rows": [], "image_path": None}), "none")
 
     def test_complex_table_without_image_is_flagged(self):
-        record = make_record(ocr="14%")
         table = {
             "type": "table",
             "ref": "#/tables/0",
@@ -1742,9 +1749,8 @@ class SourceFingerprintTests(unittest.TestCase):
         with patch(
             "parse_docling_slim.build_converter",
             side_effect=RuntimeError("conversion exploded"),
-        ):
-            with self.assertRaises(RuntimeError):
-                parse_document(str(self.root / "fingerprint.pdf"), str(output), force=True)
+        ), self.assertRaises(RuntimeError):
+            parse_document(str(self.root / "fingerprint.pdf"), str(output), force=True)
         self.assertFalse(output.exists())
         self.assertEqual(list(self.root.glob(".never-created.tmp-*")), [])
 
@@ -2056,9 +2062,11 @@ class _BatchInputTests(unittest.TestCase):
             info = zipfile.ZipInfo("alpha.pdf")
             info.file_size = 10  # deliberately understated
             archive.writestr(info, payload)
-        with patch("parse_docling_slim.MAX_ARCHIVE_BYTES", 64):
-            with self.assertRaises(ValueError) as caught:
-                self.parse([str(archive_path)])
+        with (
+            patch("parse_docling_slim.MAX_ARCHIVE_BYTES", 64),
+            self.assertRaises(ValueError) as caught,
+        ):
+            self.parse([str(archive_path)])
         self.assertIn("expands past", str(caught.exception))
         # The partial member must not be left behind in the extraction root.
         self.assertEqual(
@@ -2103,15 +2111,14 @@ class _BatchInputTests(unittest.TestCase):
         with patch(
             "parse_docling_slim.build_converter",
             side_effect=RuntimeError("conversion exploded"),
-        ):
-            with self.assertRaises(RuntimeError):
-                parse_many(
-                    [str(self.documents)],
-                    str(self.output),
-                    force=True,
-                    enable_vision=False,
-                    continue_on_error=False,
-                )
+        ), self.assertRaises(RuntimeError):
+            parse_many(
+                [str(self.documents)],
+                str(self.output),
+                force=True,
+                enable_vision=False,
+                continue_on_error=False,
+            )
 
     def test_colliding_names_get_distinct_directories(self):
         archive = self.make_zip(

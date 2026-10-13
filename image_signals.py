@@ -27,7 +27,8 @@ from __future__ import annotations
 import difflib
 import re
 from collections import Counter
-from typing import Any, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 BACKGROUND_COVERAGE = 0.6
 
